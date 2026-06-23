@@ -1,9 +1,9 @@
 name: rust-api
 
 # Reusable CI/CD for a deployable Rust HTTP service (axum) on Fly.io.
-# fmt / deny / build / clippy / test, then deploy to Fly on push to main and
-# gate on a post-deploy health check (scale-to-zero hides crash-on-boot, so we
-# force a start and fail unless the app actually serves). Callers stay thin:
+# fmt / deny / build / clippy / test, then (optionally) deploy to Fly on push to
+# main and gate on a post-deploy health check. Services that depend on private
+# crates from kellnr pass KELLNR_TOKEN so the cargo jobs can fetch them.
 #
 #   jobs:
 #     cicd:
@@ -11,30 +11,39 @@ name: rust-api
 #       with:
 #         app: sitehub-iam
 #         health-url: https://iam.sitehub.bg/api/ready
+#         deploy: true            # set false for CI-only until the Fly app exists
 #       secrets:
 #         FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+#         KELLNR_TOKEN:  ${{ secrets.KELLNR_TOKEN }}
+#
+# The caller repo must ship `.cargo/config.toml` defining the `kellnr` registry
+# and `global-credential-providers = ["cargo:token"]`.
 
 on:
   workflow_call:
     inputs:
       app:
-        description: "Fly app name to deploy to"
         type: string
         required: true
       fly-config:
-        description: "Path to the Fly config"
         type: string
         default: "fly.toml"
       health-url:
-        description: "Public URL hit after deploy; must return 200 or the job fails"
         type: string
         required: true
       rust-version:
         type: string
         default: "1.96"
+      deploy:
+        description: "Deploy to Fly on push to main"
+        type: boolean
+        default: true
     secrets:
       FLY_API_TOKEN:
-        required: true
+        required: false
+      KELLNR_TOKEN:
+        description: "kellnr token so cargo can fetch private sitehub-common-* crates"
+        required: false
 
 permissions:
   contents: read
@@ -70,6 +79,8 @@ jobs:
     needs: [fmt, deny]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      CARGO_REGISTRIES_KELLNR_TOKEN: ${{ secrets.KELLNR_TOKEN }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -86,6 +97,8 @@ jobs:
     needs: [build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      CARGO_REGISTRIES_KELLNR_TOKEN: ${{ secrets.KELLNR_TOKEN }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -102,6 +115,8 @@ jobs:
     needs: [build]
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      CARGO_REGISTRIES_KELLNR_TOKEN: ${{ secrets.KELLNR_TOKEN }}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -116,7 +131,7 @@ jobs:
 
   deploy:
     needs: [clippy, test]
-    if: github.ref == 'refs/heads/main'
+    if: inputs.deploy && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:
