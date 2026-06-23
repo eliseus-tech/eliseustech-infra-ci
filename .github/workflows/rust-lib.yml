@@ -1,0 +1,145 @@
+name: rust-lib
+
+# Reusable CI for a publishable Rust library workspace.
+# fmt / deny / build / clippy / test, then publish to the kellnr registry on
+# push to main (after green). Callers stay thin:
+#
+#   jobs:
+#     ci:
+#       uses: sitehub-bg/sitehub-ci/.github/workflows/rust-lib.yml@v1
+#       with:
+#         publish-crates: "crate-a crate-b crate-c"   # dependency order
+#       secrets:
+#         KELLNR_TOKEN: ${{ secrets.KELLNR_TOKEN }}
+#
+# The caller repo must ship a `.cargo/config.toml` defining the `kellnr` registry.
+
+on:
+  workflow_call:
+    inputs:
+      rust-version:
+        description: "Toolchain channel for build/clippy/test"
+        type: string
+        default: "1.96"
+      publish-crates:
+        description: "Space-separated crate names in dependency order. Empty = no publish."
+        type: string
+        default: ""
+    secrets:
+      KELLNR_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - run: cargo +nightly fmt --all -- --check
+
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@cargo-deny
+      - run: cargo deny check
+
+  build:
+    needs: [fmt, deny]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust-version }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-build
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo build --locked --workspace --all-targets
+
+  clippy:
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust-version }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-build
+          save-if: false
+      - run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  test:
+    needs: [build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust-version }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-build
+          save-if: false
+      - uses: taiki-e/install-action@nextest
+      - run: cargo nextest run --locked --workspace
+
+  publish:
+    needs: [clippy, test]
+    if: inputs.publish-crates != '' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: publish-kellnr-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust-version }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-build
+          save-if: false
+      # Publish in the given dependency order; skip versions already on kellnr
+      # (so a push without a version bump is a no-op).
+      - name: Publish to kellnr
+        env:
+          CARGO_REGISTRIES_KELLNR_TOKEN: ${{ secrets.KELLNR_TOKEN }}
+          PUBLISH_CRATES: ${{ inputs.publish-crates }}
+        run: |
+          set -uo pipefail
+          for c in $PUBLISH_CRATES; do
+            echo "::group::publish $c"
+            out=$(cargo publish -p "$c" --registry kellnr --no-verify --locked 2>&1) || true
+            echo "$out"
+            if echo "$out" | grep -qiE "already (exists|uploaded)|is already uploaded"; then
+              echo "$c: version already on kellnr — skipped"
+            elif echo "$out" | grep -qiE "(^|[^a-z])error[: ]"; then
+              echo "::error::$c publish failed"; exit 1
+            fi
+            echo "::endgroup::"
+          done
