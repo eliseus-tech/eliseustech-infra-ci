@@ -38,6 +38,10 @@ on:
         description: "Deploy to Fly on push to main"
         type: boolean
         default: true
+      publish-crates:
+        description: "Space-separated crate names (dependency order) to publish to kellnr on push to main. E.g. a service's contract crate. Empty = nothing published."
+        type: string
+        default: ""
     secrets:
       FLY_API_TOKEN:
         required: false
@@ -128,6 +132,43 @@ jobs:
           save-if: false
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --locked --workspace
+
+  # Publish this service's contract crate(s) to kellnr (e.g. sitehub-iam-contracts)
+  # so external consumers (the gateway) can depend on them.
+  publish:
+    needs: [clippy, test]
+    if: inputs.publish-crates != '' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: publish-kellnr-${{ github.repository }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust-version }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-build
+          save-if: false
+      - name: Publish to kellnr
+        env:
+          CARGO_REGISTRIES_KELLNR_TOKEN: ${{ secrets.KELLNR_TOKEN }}
+          PUBLISH_CRATES: ${{ inputs.publish-crates }}
+        run: |
+          set -uo pipefail
+          for c in $PUBLISH_CRATES; do
+            echo "::group::publish $c"
+            out=$(cargo publish -p "$c" --registry kellnr --no-verify --locked 2>&1) || true
+            echo "$out"
+            if echo "$out" | grep -qiE "already (exists|uploaded)|is already uploaded"; then
+              echo "$c: version already on kellnr — skipped"
+            elif echo "$out" | grep -qiE "(^|[^a-z])error[: ]"; then
+              echo "::error::$c publish failed"; exit 1
+            fi
+            echo "::endgroup::"
+          done
 
   deploy:
     needs: [clippy, test]
