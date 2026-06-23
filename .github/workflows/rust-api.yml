@@ -1,52 +1,59 @@
 name: rust-api
 
-# Reusable CI/CD for a deployable Rust HTTP service (axum) on Fly.io.
-# fmt / deny / build / clippy / test, then (optionally) deploy to Fly on push to
-# main and gate on a post-deploy health check. Services that depend on private
-# crates from kellnr pass KELLNR_TOKEN so the cargo jobs can fetch them.
+# Reusable CI/CD for a deployable Rust service on Fly.io.
+# fmt / deny / build / clippy / test, then:
+#   - push to main  -> deploy <app>-staging
+#   - push tag v*   -> deploy <app>-production
+# A post-deploy health gate runs only when a public health URL is given (private
+# services — reached over 6PN — omit it; the public gateway's smoke covers the path).
 #
+#   on:
+#     pull_request:
+#     push: { branches: [main], tags: ['v*'] }
 #   jobs:
 #     cicd:
 #       uses: sitehub-bg/sitehub-ci/.github/workflows/rust-api.yml@v1
 #       with:
-#         app: sitehub-iam
-#         health-url: https://iam.sitehub.bg/api/ready
-#         deploy: true            # set false for CI-only until the Fly app exists
+#         app: sitehub-iam            # env suffix added: -staging / -production
+#         staging-health-url: ""      # private service -> no public smoke
 #       secrets:
 #         FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 #         KELLNR_TOKEN:  ${{ secrets.KELLNR_TOKEN }}
-#
-# The caller repo must ship `.cargo/config.toml` defining the `kellnr` registry
-# and `global-credential-providers = ["cargo:token"]`.
 
 on:
   workflow_call:
     inputs:
       app:
+        description: "Base Fly app name; the env suffix is appended (-staging / -production)"
         type: string
         required: true
-      fly-config:
+      staging-config:
         type: string
-        default: "fly.toml"
-      health-url:
+        default: "fly.staging.toml"
+      production-config:
         type: string
-        required: true
+        default: "fly.production.toml"
+      staging-health-url:
+        description: "Public URL smoke-checked after the staging deploy (empty = skip)"
+        type: string
+        default: ""
+      production-health-url:
+        type: string
+        default: ""
       rust-version:
         type: string
         default: "1.96"
       deploy:
-        description: "Deploy to Fly on push to main"
         type: boolean
         default: true
       publish-crates:
-        description: "Space-separated crate names (dependency order) to publish to kellnr on push to main. E.g. a service's contract crate. Empty = nothing published."
+        description: "Space-separated crates (dep order) to publish to kellnr on push to main"
         type: string
         default: ""
     secrets:
       FLY_API_TOKEN:
         required: false
       KELLNR_TOKEN:
-        description: "kellnr token so cargo can fetch private sitehub-common-* crates"
         required: false
 
 permissions:
@@ -75,8 +82,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      # `cargo deny check` runs `cargo metadata`, which resolves private
-      # sitehub-common-* deps from kellnr — needs the token to authenticate.
       CARGO_REGISTRIES_KELLNR_TOKEN: ${{ secrets.KELLNR_TOKEN }}
     steps:
       - uses: actions/checkout@v6
@@ -137,8 +142,6 @@ jobs:
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --locked --workspace
 
-  # Publish this service's contract crate(s) to kellnr (e.g. sitehub-iam-contracts)
-  # so external consumers (the gateway) can depend on them.
   publish:
     needs: [clippy, test]
     if: inputs.publish-crates != '' && github.ref == 'refs/heads/main'
@@ -176,29 +179,27 @@ jobs:
             echo "::endgroup::"
           done
 
-  deploy:
+  deploy-staging:
     needs: [clippy, test]
     if: inputs.deploy && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     concurrency:
-      group: deploy-${{ inputs.app }}
+      group: deploy-${{ inputs.app }}-staging
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v6
       - uses: superfly/flyctl-actions/setup-flyctl@v1.4
-      - name: Deploy to Fly
-        run: flyctl deploy --remote-only --config "$FLY_CONFIG" --app "$APP"
+      - name: Deploy to Fly (staging)
+        run: flyctl deploy --remote-only --config "$CFG" --app "${APP}-staging"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-          FLY_CONFIG: ${{ inputs.fly-config }}
+          CFG: ${{ inputs.staging-config }}
           APP: ${{ inputs.app }}
-      # Scale-to-zero lets `flyctl deploy` report success without starting the
-      # binary, so a crash-on-boot goes unnoticed. Force a start and fail unless
-      # the app actually serves.
-      - name: Smoke check (healthy after deploy)
+      - name: Smoke check (staging)
+        if: inputs.staging-health-url != ''
         env:
-          HEALTH_URL: ${{ inputs.health-url }}
+          HEALTH_URL: ${{ inputs.staging-health-url }}
           APP: ${{ inputs.app }}
         run: |
           code=$(curl -sS -o /dev/null -w '%{http_code}' \
@@ -206,6 +207,38 @@ jobs:
             --max-time 20 "$HEALTH_URL" || true)
           echo "GET $HEALTH_URL -> HTTP $code"
           if [ "$code" != "200" ]; then
-            echo "::error::$APP not healthy after deploy ($HEALTH_URL returned $code)"
+            echo "::error::${APP}-staging not healthy after deploy ($HEALTH_URL returned $code)"
+            exit 1
+          fi
+
+  deploy-production:
+    needs: [clippy, test]
+    if: inputs.deploy && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: deploy-${{ inputs.app }}-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+      - uses: superfly/flyctl-actions/setup-flyctl@v1.4
+      - name: Deploy to Fly (production)
+        run: flyctl deploy --remote-only --config "$CFG" --app "${APP}-production"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          CFG: ${{ inputs.production-config }}
+          APP: ${{ inputs.app }}
+      - name: Smoke check (production)
+        if: inputs.production-health-url != ''
+        env:
+          HEALTH_URL: ${{ inputs.production-health-url }}
+          APP: ${{ inputs.app }}
+        run: |
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            --retry 8 --retry-delay 5 --retry-all-errors --retry-connrefused \
+            --max-time 20 "$HEALTH_URL" || true)
+          echo "GET $HEALTH_URL -> HTTP $code"
+          if [ "$code" != "200" ]; then
+            echo "::error::${APP}-production not healthy after deploy ($HEALTH_URL returned $code)"
             exit 1
           fi
