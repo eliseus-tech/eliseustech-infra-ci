@@ -134,12 +134,14 @@ jobs:
           set -uo pipefail
           for c in $PUBLISH_CRATES; do
             echo "::group::publish $c"
-            out=$(cargo publish -p "$c" --registry kellnr --no-verify --locked 2>&1) || true
+            out=$(cargo publish -p "$c" --registry kellnr --no-verify --locked 2>&1); rc=$?
             echo "$out"
-            if echo "$out" | grep -qiE "already (exists|uploaded)|is already uploaded"; then
+            if [ "$rc" -eq 0 ]; then
+              echo "$c: published"
+            elif echo "$out" | grep -qiE "already (exists|uploaded)"; then
               echo "$c: version already on kellnr — skipped"
-            elif echo "$out" | grep -qiE "(^|[^a-z])error[: ]"; then
-              echo "::error::$c publish failed"; exit 1
+            else
+              echo "::error::$c publish failed (exit $rc)"; exit 1
             fi
             echo "::endgroup::"
           done
