@@ -74,6 +74,10 @@ jobs:
   deny:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # `cargo deny check` runs `cargo metadata`, which resolves private
+      # sitehub-common-* deps from kellnr — needs the token to authenticate.
+      CARGO_REGISTRIES_KELLNR_TOKEN: ${{ secrets.KELLNR_TOKEN }}
     steps:
       - uses: actions/checkout@v6
       - uses: taiki-e/install-action@cargo-deny
