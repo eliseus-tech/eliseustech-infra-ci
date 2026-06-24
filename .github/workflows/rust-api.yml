@@ -196,7 +196,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: superfly/flyctl-actions/setup-flyctl@v1.4
       - name: Deploy to Fly (staging)
-        run: flyctl deploy --remote-only --config "$CFG" --app "${APP}-staging" --build-secret kellnr_token="$KELLNR"
+        run: flyctl deploy --local-only --config "$CFG" --app "${APP}-staging" --build-secret kellnr_token="$KELLNR"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_STAGING }}
           KELLNR: ${{ secrets.KELLNR_TOKEN }}
@@ -229,7 +229,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: superfly/flyctl-actions/setup-flyctl@v1.4
       - name: Deploy to Fly (production)
-        run: flyctl deploy --remote-only --config "$CFG" --app "${APP}-production" --build-secret kellnr_token="$KELLNR"
+        run: flyctl deploy --local-only --config "$CFG" --app "${APP}-production" --build-secret kellnr_token="$KELLNR"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_PRODUCTION }}
           KELLNR: ${{ secrets.KELLNR_TOKEN }}
