@@ -134,14 +134,17 @@ jobs:
           set -uo pipefail
           for c in $PUBLISH_CRATES; do
             echo "::group::publish $c"
-            out=$(cargo publish -p "$c" --registry kellnr --no-verify --locked 2>&1); rc=$?
-            echo "$out"
-            if [ "$rc" -eq 0 ]; then
-              echo "$c: published"
-            elif echo "$out" | grep -qiE "already (exists|uploaded)"; then
-              echo "$c: version already on kellnr — skipped"
+            ver=$(cargo metadata --no-deps --format-version 1 | jq -r --arg c "$c" '.packages[]|select(.name==$c)|.version')
+            pre=$(printf '%s' "$c" | cut -c1-2); mid=$(printf '%s' "$c" | cut -c3-4)
+            idx=$(curl -fsS --retry 5 --retry-all-errors --max-time 30 \
+              -H "Authorization: $CARGO_REGISTRIES_KELLNR_TOKEN" \
+              "https://kellnr.sitehub.bg/api/v1/crates/$pre/$mid/$c" 2>/dev/null || true)
+            if printf '%s' "$idx" | grep -q "\"vers\":\"$ver\""; then
+              echo "$c@$ver already on kellnr — skip"
             else
-              echo "::error::$c publish failed (exit $rc)"; exit 1
+              cargo publish -p "$c" --registry kellnr --no-verify --locked \
+                || { echo "::error::$c publish failed"; exit 1; }
+              echo "$c@$ver published"
             fi
             echo "::endgroup::"
           done
