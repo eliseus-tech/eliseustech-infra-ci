@@ -195,13 +195,32 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: superfly/flyctl-actions/setup-flyctl@v1.4
-      - name: Deploy to Fly (staging)
-        run: flyctl deploy --local-only --config "$CFG" --app "${APP}-staging" --build-secret kellnr_token="$KELLNR"
+      - uses: docker/setup-buildx-action@v3
+      - name: Authenticate Docker to the Fly registry
+        run: flyctl auth docker
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_STAGING }}
-          KELLNR: ${{ secrets.KELLNR_TOKEN }}
+      # Persisted BuildKit cache: the cargo-chef dependency layer (surrealdb etc.)
+      # compiles once and is reused across runs — no double compile, no remote
+      # OOM, no glibc mismatch (build+run both in Docker). scope is per-service so
+      # staging and production share one cache.
+      - name: Build & push image (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: registry.fly.io/${{ inputs.app }}-staging:ci-${{ github.sha }}
+          secrets: |
+            kellnr_token=${{ secrets.KELLNR_TOKEN }}
+          cache-from: type=gha,scope=${{ inputs.app }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.app }}
+      - name: Deploy image to Fly (staging)
+        run: flyctl deploy --config "$CFG" --app "${APP}-staging" --image "registry.fly.io/${APP}-staging:ci-${SHA}"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_STAGING }}
           CFG: ${{ inputs.staging-config }}
           APP: ${{ inputs.app }}
+          SHA: ${{ github.sha }}
       - name: Smoke check (staging)
         if: inputs.staging-health-url != ''
         env:
@@ -228,13 +247,28 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: superfly/flyctl-actions/setup-flyctl@v1.4
-      - name: Deploy to Fly (production)
-        run: flyctl deploy --local-only --config "$CFG" --app "${APP}-production" --build-secret kellnr_token="$KELLNR"
+      - uses: docker/setup-buildx-action@v3
+      - name: Authenticate Docker to the Fly registry
+        run: flyctl auth docker
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_PRODUCTION }}
-          KELLNR: ${{ secrets.KELLNR_TOKEN }}
+      - name: Build & push image (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: registry.fly.io/${{ inputs.app }}-production:ci-${{ github.sha }}
+          secrets: |
+            kellnr_token=${{ secrets.KELLNR_TOKEN }}
+          cache-from: type=gha,scope=${{ inputs.app }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.app }}
+      - name: Deploy image to Fly (production)
+        run: flyctl deploy --config "$CFG" --app "${APP}-production" --image "registry.fly.io/${APP}-production:ci-${SHA}"
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_PRODUCTION }}
           CFG: ${{ inputs.production-config }}
           APP: ${{ inputs.app }}
+          SHA: ${{ github.sha }}
       - name: Smoke check (production)
         if: inputs.production-health-url != ''
         env:
