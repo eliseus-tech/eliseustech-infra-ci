@@ -51,7 +51,9 @@ on:
         type: string
         default: ""
     secrets:
-      FLY_API_TOKEN:
+      FLY_API_TOKEN_STAGING:
+        required: false
+      FLY_API_TOKEN_PRODUCTION:
         required: false
       KELLNR_TOKEN:
         required: false
@@ -193,7 +195,7 @@ jobs:
       - name: Deploy to Fly (staging)
         run: flyctl deploy --remote-only --config "$CFG" --app "${APP}-staging"
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_STAGING }}
           CFG: ${{ inputs.staging-config }}
           APP: ${{ inputs.app }}
       - name: Smoke check (staging)
@@ -225,7 +227,7 @@ jobs:
       - name: Deploy to Fly (production)
         run: flyctl deploy --remote-only --config "$CFG" --app "${APP}-production"
         env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_PRODUCTION }}
           CFG: ${{ inputs.production-config }}
           APP: ${{ inputs.app }}
       - name: Smoke check (production)
