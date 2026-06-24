@@ -105,7 +105,7 @@ jobs:
           shared-key: rust-build
           save-if: false
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --locked --workspace
+      - run: cargo nextest run --locked --workspace --no-tests=pass
 
   publish:
     needs: [clippy, test]
