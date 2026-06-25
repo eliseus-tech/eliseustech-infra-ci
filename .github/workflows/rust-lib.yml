@@ -59,10 +59,12 @@ jobs:
       - uses: taiki-e/install-action@cargo-deny
       - run: cargo deny check
 
-  build:
+  # No separate debug `build` job — clippy compiles the workspace anyway, so it is
+  # the compile gate. clippy populates the shared cache; test reuses it.
+  clippy:
     needs: [fmt, deny]
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@master
@@ -73,26 +75,10 @@ jobs:
         with:
           shared-key: rust-build
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo build --locked --workspace --all-targets
-
-  clippy:
-    needs: [build]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ inputs.rust-version }}
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: rust-build
-          save-if: false
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   test:
-    needs: [build]
+    needs: [fmt, deny]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
