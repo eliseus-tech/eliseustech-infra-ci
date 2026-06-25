@@ -1,0 +1,117 @@
+name: fe-astro
+
+# Reusable CI/CD for an Astro frontend deployed to Cloudflare Pages.
+# check (astro check + sanity build), then:
+#   - push to main  -> build with the staging API base -> deploy the staging Pages project
+#   - push tag v*   -> build with the production API base -> deploy the production Pages project
+# PUBLIC_API_BASE is baked at build time, so each environment is a separate build.
+#
+#   on:
+#     pull_request:
+#     push: { branches: [main], tags: ['v*'] }
+#   jobs:
+#     cicd:
+#       uses: sitehub-bg/sitehub-ci/.github/workflows/fe-astro.yml@v1
+#       with:
+#         staging-project: sitehub-web-admin-staging
+#         production-project: sitehub-web-admin
+#         staging-api-base: https://staging-api.sitehub.bg
+#         production-api-base: https://api.sitehub.bg
+#       secrets:
+#         CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+#         CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+on:
+  workflow_call:
+    inputs:
+      staging-project:
+        description: "Cloudflare Pages project for staging (deployed on push to main)"
+        type: string
+        required: true
+      production-project:
+        description: "Cloudflare Pages project for production (deployed on tag v*)"
+        type: string
+        required: true
+      staging-api-base:
+        type: string
+        required: true
+      production-api-base:
+        type: string
+        required: true
+      node-version:
+        type: string
+        default: "24"
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+
+  deploy-staging:
+    needs: [check]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: deploy-${{ inputs.staging-project }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        env:
+          PUBLIC_API_BASE: ${{ inputs.staging-api-base }}
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=${{ inputs.staging-project }} --branch=main
+
+  deploy-production:
+    needs: [check]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: deploy-${{ inputs.production-project }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        env:
+          PUBLIC_API_BASE: ${{ inputs.production-api-base }}
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=${{ inputs.production-project }} --branch=main
