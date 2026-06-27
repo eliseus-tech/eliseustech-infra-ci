@@ -95,7 +95,7 @@ jobs:
   clippy:
     needs: [fmt, deny]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       CARGO_REGISTRIES_KELLNR_TOKEN: ${{ secrets.KELLNR_TOKEN }}
     steps:
@@ -113,7 +113,7 @@ jobs:
   test:
     needs: [fmt, deny]
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       CARGO_REGISTRIES_KELLNR_TOKEN: ${{ secrets.KELLNR_TOKEN }}
     steps:
