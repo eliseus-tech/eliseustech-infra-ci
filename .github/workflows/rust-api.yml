@@ -7,18 +7,37 @@ name: rust-api
 # A post-deploy health gate runs only when a public health URL is given (private
 # services — reached over 6PN — omit it; the public gateway's smoke covers the path).
 #
+# Registry: ghcr.io/sitehub-bg/<app>:ci-<sha> (was registry.fly.io/<app>-{env}).
+# One image path for both environments — no per-app-namespace retag needed to
+# promote staging's image to production (see sitehub-release). GITHUB_TOKEN
+# covers push from this workflow; Fly's own image pull does NOT reliably support
+# auth against external private registries, so the GHCR packages must be public
+# (fine here — these binaries carry no secrets; config comes from Fly env vars,
+# per ADR-0031). Set visibility once per package after the first push:
+#   gh api -X PATCH /orgs/sitehub-bg/packages/container/<app>/visibility \
+#     -f visibility=public
+#
 #   on:
 #     pull_request:
 #     push: { branches: [main], tags: ['v*'] }
+#   permissions:                     # REQUIRED in the caller: a reusable workflow
+#     contents: read                 # cannot grant itself more than the caller has,
+#     packages: write                # and GHCR push needs packages:write.
 #   jobs:
 #     cicd:
-#       uses: sitehub-bg/sitehub-ci/.github/workflows/rust-api.yml@v1
+#       uses: sitehub-bg/sitehub-infra-ci/.github/workflows/rust-api.yml@v2
 #       with:
 #         app: sitehub-iam            # env suffix added: -staging / -production
 #         staging-health-url: ""      # private service -> no public smoke
 #       secrets:
-#         FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-#         KELLNR_TOKEN:  ${{ secrets.KELLNR_TOKEN }}
+#         FLY_API_TOKEN_STAGING:    ${{ secrets.FLY_API_TOKEN_STAGING }}
+#         FLY_API_TOKEN_PRODUCTION: ${{ secrets.FLY_API_TOKEN_PRODUCTION }}
+#         KELLNR_TOKEN:             ${{ secrets.KELLNR_TOKEN }}
+#
+# Orgs: staging apps live in the `sitehub-staging` Fly org, production apps in
+# `sitehub-production`; shared infra (kellnr) stays in `sitehub`. The org is NOT a
+# workflow input -- a Fly deploy token implicitly carries its own org, so the two
+# FLY_API_TOKEN_* secrets are what select the target org.
 
 on:
   workflow_call:
@@ -60,6 +79,7 @@ on:
 
 permissions:
   contents: read
+  packages: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -180,10 +200,12 @@ jobs:
       - uses: actions/checkout@v6
       - uses: superfly/flyctl-actions/setup-flyctl@v1.4
       - uses: docker/setup-buildx-action@v3
-      - name: Authenticate Docker to the Fly registry
-        run: flyctl auth docker
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_STAGING }}
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       # Persisted BuildKit cache: the cargo-chef dependency layer (surrealdb etc.)
       # compiles once and is reused across runs — no double compile, no remote
       # OOM, no glibc mismatch (build+run both in Docker). scope is per-service so
@@ -193,13 +215,13 @@ jobs:
         with:
           context: .
           push: true
-          tags: registry.fly.io/${{ inputs.app }}-staging:ci-${{ github.sha }}
+          tags: ghcr.io/sitehub-bg/${{ inputs.app }}:ci-${{ github.sha }}
           secrets: |
             kellnr_token=${{ secrets.KELLNR_TOKEN }}
           cache-from: type=gha,scope=${{ inputs.app }}
           cache-to: type=gha,mode=max,scope=${{ inputs.app }}
       - name: Deploy image to Fly (staging)
-        run: flyctl deploy --config "$CFG" --app "${APP}-staging" --image "registry.fly.io/${APP}-staging:ci-${SHA}"
+        run: flyctl deploy --config "$CFG" --app "${APP}-staging" --image "ghcr.io/sitehub-bg/${APP}:ci-${SHA}"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_STAGING }}
           CFG: ${{ inputs.staging-config }}
@@ -225,6 +247,11 @@ jobs:
     if: inputs.deploy && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Gated by the `production` GitHub Environment — configure required reviewers
+    # and/or a wait timer there. Without it, a `v*` tag from any machine holding a
+    # push credential deploys straight to production: the one path that bypasses
+    # every network boundary between the dev box and production.
+    environment: production
     concurrency:
       group: deploy-${{ inputs.app }}-production
       cancel-in-progress: false
@@ -232,22 +259,28 @@ jobs:
       - uses: actions/checkout@v6
       - uses: superfly/flyctl-actions/setup-flyctl@v1.4
       - uses: docker/setup-buildx-action@v3
-      - name: Authenticate Docker to the Fly registry
-        run: flyctl auth docker
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_PRODUCTION }}
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Same image path as staging (ci-<sha>). When the tagged commit already went
+      # through main this is a cache hit and the push is a no-op, so production runs
+      # the bit-identical artifact staging validated — the reason for one shared
+      # image path rather than per-app-per-env Fly registry namespaces.
       - name: Build & push image (cached)
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: registry.fly.io/${{ inputs.app }}-production:ci-${{ github.sha }}
+          tags: ghcr.io/sitehub-bg/${{ inputs.app }}:ci-${{ github.sha }}
           secrets: |
             kellnr_token=${{ secrets.KELLNR_TOKEN }}
           cache-from: type=gha,scope=${{ inputs.app }}
           cache-to: type=gha,mode=max,scope=${{ inputs.app }}
       - name: Deploy image to Fly (production)
-        run: flyctl deploy --config "$CFG" --app "${APP}-production" --image "registry.fly.io/${APP}-production:ci-${SHA}"
+        run: flyctl deploy --config "$CFG" --app "${APP}-production" --image "ghcr.io/sitehub-bg/${APP}:ci-${SHA}"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_PRODUCTION }}
           CFG: ${{ inputs.production-config }}
