@@ -38,63 +38,6 @@ on:
       KELLNR_TOKEN:
         required: false
 
-permissions:                     # REQUIRED in the caller: a reusable workflow
-#     contents: read                 # cannot grant itself more than the caller has,
-#     packages: write                # and GHCR push needs packages:write.
-#   jobs:
-#     cicd:
-#       uses: sitehub-bg/sitehub-infra-ci/.github/workflows/rust-api.yml@v2
-#       with:
-#         app: sitehub-iam            # env suffix added: -staging / -production
-#         staging-health-url: ""      # private service -> no public smoke
-#       secrets:
-#         FLY_API_TOKEN_STAGING:    ${{ secrets.FLY_API_TOKEN_STAGING }}
-#         FLY_API_TOKEN_PRODUCTION: ${{ secrets.FLY_API_TOKEN_PRODUCTION }}
-#         KELLNR_TOKEN:             ${{ secrets.KELLNR_TOKEN }}
-#
-# Orgs: staging apps live in the `sitehub-staging` Fly org, production apps in
-# `sitehub-production`; shared infra (kellnr) stays in `sitehub`. The org is NOT a
-# workflow input -- a Fly deploy token implicitly carries its own org, so the two
-# FLY_API_TOKEN_* secrets are what select the target org.
-
-on:
-  workflow_call:
-    inputs:
-      app:
-        description: "Base Fly app name; the env suffix is appended (-staging / -production)"
-        type: string
-        required: true
-      staging-config:
-        type: string
-        default: "fly.staging.toml"
-      production-config:
-        type: string
-        default: "fly.production.toml"
-      staging-health-url:
-        description: "Public URL smoke-checked after the staging deploy (empty = skip)"
-        type: string
-        default: ""
-      production-health-url:
-        type: string
-        default: ""
-      rust-version:
-        type: string
-        default: "1.96"
-      deploy:
-        type: boolean
-        default: true
-      publish-crates:
-        description: "Space-separated crates (dep order) to publish to kellnr on push to main"
-        type: string
-        default: ""
-    secrets:
-      FLY_API_TOKEN_STAGING:
-        required: false
-      FLY_API_TOKEN_PRODUCTION:
-        required: false
-      KELLNR_TOKEN:
-        required: false
-
 permissions:
   contents: read
 
