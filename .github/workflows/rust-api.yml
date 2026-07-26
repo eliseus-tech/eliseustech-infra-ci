@@ -1,26 +1,44 @@
 name: rust-api
 
-# Reusable CI/CD for a deployable Rust service on Fly.io.
-# fmt / deny / build / clippy / test, then:
-#   - push to main  -> deploy <app>-staging
-#   - push tag v*   -> deploy <app>-production
-# A post-deploy health gate runs only when a public health URL is given (private
-# services — reached over 6PN — omit it; the public gateway's smoke covers the path).
+# Reusable CI gates for a deployable Rust service: fmt / deny / clippy / test,
+# plus optional crate publishing to kellnr on push to main.
 #
-# Registry: ghcr.io/sitehub-bg/<app>:ci-<sha> (was registry.fly.io/<app>-{env}).
-# One image path for both environments — no per-app-namespace retag needed to
-# promote staging's image to production (see sitehub-release). GITHUB_TOKEN
-# covers push from this workflow; Fly's own image pull does NOT reliably support
-# auth against external private registries, so the GHCR packages must be public
-# (fine here — these binaries carry no secrets; config comes from Fly env vars,
-# per ADR-0031). Set visibility once per package after the first push:
-#   gh api -X PATCH /orgs/sitehub-bg/packages/container/<app>/visibility \
-#     -f visibility=public
+# This workflow does NOT build images and does NOT deploy. Images are built
+# locally with Podman and pushed to GHCR (see ~/work/sitehub-local/justfile:
+# build-<svc> then push-<svc>), and deployment is a deliberate manual dispatch
+# of deploy-image.yml against an explicit image tag. Consequences worth knowing:
+#
+#   - No Fly token is needed here at all; it lives only in the deploy workflow.
+#   - Merging to main no longer ships anything. Deploys are always explicit.
+#   - Production cannot be reached by pushing a v* tag, which removes the one
+#     path that bypassed every network boundary between a dev box and production.
 #
 #   on:
 #     pull_request:
-#     push: { branches: [main], tags: ['v*'] }
-#   permissions:                     # REQUIRED in the caller: a reusable workflow
+#     push: { branches: [main] }
+#   jobs:
+#     cicd:
+#       uses: sitehub-bg/sitehub-infra-ci/.github/workflows/rust-api.yml@v3
+#       with:
+#         publish-crates: sitehub-iam-core sitehub-iam-contracts
+#       secrets:
+#         KELLNR_TOKEN: ${{ secrets.KELLNR_TOKEN }}
+
+on:
+  workflow_call:
+    inputs:
+      rust-version:
+        type: string
+        default: "1.96"
+      publish-crates:
+        description: "Space-separated crates (dep order) to publish to kellnr on push to main"
+        type: string
+        default: ""
+    secrets:
+      KELLNR_TOKEN:
+        required: false
+
+permissions:                     # REQUIRED in the caller: a reusable workflow
 #     contents: read                 # cannot grant itself more than the caller has,
 #     packages: write                # and GHCR push needs packages:write.
 #   jobs:
@@ -79,7 +97,6 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -187,116 +204,3 @@ jobs:
             fi
             echo "::endgroup::"
           done
-
-  deploy-staging:
-    needs: [clippy, test]
-    if: inputs.deploy && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    concurrency:
-      group: deploy-${{ inputs.app }}-staging
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@v6
-      - uses: superfly/flyctl-actions/setup-flyctl@v1.4
-      - uses: docker/setup-buildx-action@v3
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      # Persisted BuildKit cache: the cargo-chef dependency layer (surrealdb etc.)
-      # compiles once and is reused across runs — no double compile, no remote
-      # OOM, no glibc mismatch (build+run both in Docker). scope is per-service so
-      # staging and production share one cache.
-      - name: Build & push image (cached)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ghcr.io/sitehub-bg/${{ inputs.app }}:ci-${{ github.sha }}
-          secrets: |
-            kellnr_token=${{ secrets.KELLNR_TOKEN }}
-          cache-from: type=gha,scope=${{ inputs.app }}
-          cache-to: type=gha,mode=max,scope=${{ inputs.app }}
-      - name: Deploy image to Fly (staging)
-        run: flyctl deploy --config "$CFG" --app "${APP}-staging" --image "ghcr.io/sitehub-bg/${APP}:ci-${SHA}"
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_STAGING }}
-          CFG: ${{ inputs.staging-config }}
-          APP: ${{ inputs.app }}
-          SHA: ${{ github.sha }}
-      - name: Smoke check (staging)
-        if: inputs.staging-health-url != ''
-        env:
-          HEALTH_URL: ${{ inputs.staging-health-url }}
-          APP: ${{ inputs.app }}
-        run: |
-          code=$(curl -sS -o /dev/null -w '%{http_code}' \
-            --retry 8 --retry-delay 5 --retry-all-errors --retry-connrefused \
-            --max-time 20 "$HEALTH_URL" || true)
-          echo "GET $HEALTH_URL -> HTTP $code"
-          if [ "$code" != "200" ]; then
-            echo "::error::${APP}-staging not healthy after deploy ($HEALTH_URL returned $code)"
-            exit 1
-          fi
-
-  deploy-production:
-    needs: [clippy, test]
-    if: inputs.deploy && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    # Gated by the `production` GitHub Environment — configure required reviewers
-    # and/or a wait timer there. Without it, a `v*` tag from any machine holding a
-    # push credential deploys straight to production: the one path that bypasses
-    # every network boundary between the dev box and production.
-    environment: production
-    concurrency:
-      group: deploy-${{ inputs.app }}-production
-      cancel-in-progress: false
-    steps:
-      - uses: actions/checkout@v6
-      - uses: superfly/flyctl-actions/setup-flyctl@v1.4
-      - uses: docker/setup-buildx-action@v3
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      # Same image path as staging (ci-<sha>). When the tagged commit already went
-      # through main this is a cache hit and the push is a no-op, so production runs
-      # the bit-identical artifact staging validated — the reason for one shared
-      # image path rather than per-app-per-env Fly registry namespaces.
-      - name: Build & push image (cached)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: ghcr.io/sitehub-bg/${{ inputs.app }}:ci-${{ github.sha }}
-          secrets: |
-            kellnr_token=${{ secrets.KELLNR_TOKEN }}
-          cache-from: type=gha,scope=${{ inputs.app }}
-          cache-to: type=gha,mode=max,scope=${{ inputs.app }}
-      - name: Deploy image to Fly (production)
-        run: flyctl deploy --config "$CFG" --app "${APP}-production" --image "ghcr.io/sitehub-bg/${APP}:ci-${SHA}"
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_PRODUCTION }}
-          CFG: ${{ inputs.production-config }}
-          APP: ${{ inputs.app }}
-          SHA: ${{ github.sha }}
-      - name: Smoke check (production)
-        if: inputs.production-health-url != ''
-        env:
-          HEALTH_URL: ${{ inputs.production-health-url }}
-          APP: ${{ inputs.app }}
-        run: |
-          code=$(curl -sS -o /dev/null -w '%{http_code}' \
-            --retry 8 --retry-delay 5 --retry-all-errors --retry-connrefused \
-            --max-time 20 "$HEALTH_URL" || true)
-          echo "GET $HEALTH_URL -> HTTP $code"
-          if [ "$code" != "200" ]; then
-            echo "::error::${APP}-production not healthy after deploy ($HEALTH_URL returned $code)"
-            exit 1
-          fi

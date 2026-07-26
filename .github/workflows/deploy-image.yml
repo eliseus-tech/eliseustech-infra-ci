@@ -1,0 +1,150 @@
+name: deploy-image
+
+# Reusable, manually-dispatched deploy of an ALREADY-BUILT image to Fly.
+#
+# Nothing is compiled here. Images are built locally with Podman and pushed to
+# GHCR (~/work/sitehub-local/justfile: build-<svc>, then push-<svc>, which tags
+# ghcr.io/sitehub-bg/<app>:ci-<sha>). This workflow only decides *which* image
+# runs *where* — the deployment control point, deliberately separate from CI.
+#
+# Why deploy from Actions rather than `just deploy-staging-<svc>` locally:
+#   - the Fly token lives in GitHub, not on the dev box
+#   - every deploy leaves an audit trail against a named image digest
+#   - production can require a reviewer via the `production` Environment
+#
+# Fly org is implicit in the token: each environment's FLY_API_TOKEN is scoped to
+# that environment's Fly org (sitehub-staging / sitehub-production), so the
+# `environment` input alone decides where a deploy lands. GHCR packages must be public, since Fly does not reliably
+# authenticate to external private registries.
+#
+#   on:
+#     workflow_dispatch:
+#       inputs:
+#         image-tag:  { type: string, required: true }
+#         environment: { type: choice, options: [staging, production] }
+#   jobs:
+#     deploy:
+#       uses: sitehub-bg/sitehub-infra-ci/.github/workflows/deploy-image.yml@v3
+#       with:
+#         app: sitehub-iam
+#         environment: ${{ inputs.environment }}
+#         image-tag: ${{ inputs.image-tag }}
+#       secrets: inherit          # required: FLY_API_TOKEN is environment-scoped
+
+on:
+  workflow_call:
+    inputs:
+      app:
+        description: "Base Fly app name; the environment suffix is appended"
+        type: string
+        required: true
+      environment:
+        description: "staging | production — selects the Fly org, config file and token"
+        type: string
+        required: true
+      image-tag:
+        description: "Tag in ghcr.io/sitehub-bg/<app>, e.g. ci-<sha>"
+        type: string
+        required: true
+      health-url:
+        description: "Public URL smoke-checked after deploy (empty = skip)"
+        type: string
+        default: ""
+
+    # No `secrets:` block on purpose. FLY_API_TOKEN is an ENVIRONMENT secret, set
+    # once per environment (staging / production) in each calling repo. A caller
+    # job has no `environment:`, so it cannot pass the value in explicitly — it
+    # would resolve to an empty repo-level secret. Instead the caller declares
+    # `secrets: inherit` and the `environment:` on the job below selects which
+    # environment's FLY_API_TOKEN is visible. Same mechanism as
+    # sitehub-infra-external's deploy-surrealdb.yml.
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: deploy-${{ inputs.app }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Resolves Environment-scoped secrets AND any protection rules (required
+    # reviewers, wait timer) configured on it. This is the production gate.
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v6
+
+      # Logging in makes the check work whether or not the package is public yet.
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Fail before touching Fly if the image was never pushed — the most likely
+      # mistake in this flow is dispatching a tag that only exists locally.
+      - name: Verify image exists in GHCR
+        env:
+          APP: ${{ inputs.app }}
+          TAG: ${{ inputs.image-tag }}
+        run: |
+          image="ghcr.io/sitehub-bg/${APP}:${TAG}"
+          echo "Checking $image"
+          if ! docker manifest inspect "$image" > /dev/null 2>&1; then
+            svc="${APP#sitehub-}"
+            echo "::error::$image not found in GHCR. Build and push it first:"
+            echo "::error::  just build-${svc} && just push-${svc}"
+            exit 1
+          fi
+          echo "found $image"
+
+      - uses: superfly/flyctl-actions/setup-flyctl@v1.4
+
+      - name: Deploy to Fly
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          APP: ${{ inputs.app }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          TAG: ${{ inputs.image-tag }}
+        run: |
+          flyctl deploy \
+            --config "fly.${ENVIRONMENT}.toml" \
+            --app "${APP}-${ENVIRONMENT}" \
+            --image "ghcr.io/sitehub-bg/${APP}:${TAG}"
+
+      - name: Smoke check
+        if: inputs.health-url != ''
+        env:
+          HEALTH_URL: ${{ inputs.health-url }}
+          APP: ${{ inputs.app }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            --retry 8 --retry-delay 5 --retry-all-errors --retry-connrefused \
+            --max-time 20 "$HEALTH_URL" || true)
+          echo "GET $HEALTH_URL -> HTTP $code"
+          if [ "$code" != "200" ]; then
+            echo "::error::${APP}-${ENVIRONMENT} not healthy after deploy ($HEALTH_URL returned $code)"
+            exit 1
+          fi
+
+      - name: Summary
+        if: always()
+        env:
+          APP: ${{ inputs.app }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          TAG: ${{ inputs.image-tag }}
+        run: |
+          {
+            echo "### Deploy"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| app | \`${APP}-${ENVIRONMENT}\` |"
+            echo "| image | \`ghcr.io/sitehub-bg/${APP}:${TAG}\` |"
+            echo "| environment | ${ENVIRONMENT} |"
+          } >> "$GITHUB_STEP_SUMMARY"
