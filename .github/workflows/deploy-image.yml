@@ -4,8 +4,15 @@ name: deploy-image
 #
 # Nothing is compiled here. Images are built locally with Podman and pushed to
 # GHCR (~/work/sitehub-local/justfile: build-<svc>, then push-<svc>, which tags
-# ghcr.io/sitehub-bg/<app>:ci-<sha>). This workflow only decides *which* image
+# ghcr.io/sitehub-bg/<repo>:ci-<sha>). This workflow only decides *which* image
 # runs *where* — the deployment control point, deliberately separate from CI.
+#
+# `app` and `image-name` are two different names and both are required:
+#   image-name  the GHCR package = the REPO name    sitehub-be-iam
+#   app         the Fly app base name               sitehub-iam  (-> sitehub-iam-staging)
+# A package belongs to the repo that produced it; a Fly app belongs to an
+# environment. They were briefly the same string, which is precisely how
+# sitehub-release's promotion matrix ended up conflating them.
 #
 # Why deploy from Actions rather than `just deploy-staging-<svc>` locally:
 #   - the Fly token lives in GitHub, not on the dev box
@@ -24,9 +31,10 @@ name: deploy-image
 #         environment: { type: choice, options: [staging, production] }
 #   jobs:
 #     deploy:
-#       uses: sitehub-bg/sitehub-infra-ci/.github/workflows/deploy-image.yml@v3
+#       uses: sitehub-bg/sitehub-infra-ci/.github/workflows/deploy-image.yml@v4
 #       with:
-#         app: sitehub-iam
+#         app: sitehub-iam                 # Fly app base name
+#         image-name: sitehub-be-iam       # GHCR package = repo name
 #         environment: ${{ inputs.environment }}
 #         image-tag: ${{ inputs.image-tag }}
 #       secrets: inherit          # required: FLY_API_TOKEN is environment-scoped
@@ -38,12 +46,16 @@ on:
         description: "Base Fly app name; the environment suffix is appended"
         type: string
         required: true
+      image-name:
+        description: "GHCR package name — the REPO name (e.g. sitehub-be-iam), not the Fly app name"
+        type: string
+        required: true
       environment:
         description: "staging | production — selects the Fly org, config file and token"
         type: string
         required: true
       image-tag:
-        description: "Tag in ghcr.io/sitehub-bg/<app>, e.g. ci-<sha>"
+        description: "Tag in ghcr.io/sitehub-bg/<image-name>, e.g. ci-<sha>"
         type: string
         required: true
       health-url:
@@ -89,15 +101,17 @@ jobs:
       # mistake in this flow is dispatching a tag that only exists locally.
       - name: Verify image exists in GHCR
         env:
-          APP: ${{ inputs.app }}
+          IMAGE_NAME: ${{ inputs.image-name }}
           TAG: ${{ inputs.image-tag }}
         run: |
-          image="ghcr.io/sitehub-bg/${APP}:${TAG}"
+          image="ghcr.io/sitehub-bg/${IMAGE_NAME}:${TAG}"
           echo "Checking $image"
           if ! docker manifest inspect "$image" > /dev/null 2>&1; then
-            svc="${APP#sitehub-}"
+            svc="${IMAGE_NAME#sitehub-be-}"
             echo "::error::$image not found in GHCR. Build and push it first:"
             echo "::error::  just build-${svc} && just push-${svc}"
+            echo "::error::If it was pushed, check the package is public:"
+            echo "::error::  https://github.com/orgs/sitehub-bg/packages/container/${IMAGE_NAME}/settings"
             exit 1
           fi
           echo "found $image"
@@ -108,13 +122,14 @@ jobs:
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           APP: ${{ inputs.app }}
+          IMAGE_NAME: ${{ inputs.image-name }}
           ENVIRONMENT: ${{ inputs.environment }}
           TAG: ${{ inputs.image-tag }}
         run: |
           flyctl deploy \
             --config "fly.${ENVIRONMENT}.toml" \
             --app "${APP}-${ENVIRONMENT}" \
-            --image "ghcr.io/sitehub-bg/${APP}:${TAG}"
+            --image "ghcr.io/sitehub-bg/${IMAGE_NAME}:${TAG}"
 
       - name: Smoke check
         if: inputs.health-url != ''
@@ -136,6 +151,7 @@ jobs:
         if: always()
         env:
           APP: ${{ inputs.app }}
+          IMAGE_NAME: ${{ inputs.image-name }}
           ENVIRONMENT: ${{ inputs.environment }}
           TAG: ${{ inputs.image-tag }}
         run: |
@@ -145,6 +161,6 @@ jobs:
             echo "| field | value |"
             echo "|---|---|"
             echo "| app | \`${APP}-${ENVIRONMENT}\` |"
-            echo "| image | \`ghcr.io/sitehub-bg/${APP}:${TAG}\` |"
+            echo "| image | \`ghcr.io/sitehub-bg/${IMAGE_NAME}:${TAG}\` |"
             echo "| environment | ${ENVIRONMENT} |"
           } >> "$GITHUB_STEP_SUMMARY"
