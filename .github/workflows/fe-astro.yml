@@ -11,7 +11,7 @@ name: fe-astro
 #     push: { branches: [main], tags: ['v*'] }
 #   jobs:
 #     cicd:
-#       uses: sitehub-bg/sitehub-ci/.github/workflows/fe-astro.yml@v1
+#       uses: sitehub-bg/sitehub-infra-ci/.github/workflows/fe-astro.yml@v4
 #       with:
 #         staging-project: sitehub-web-admin-staging
 #         production-project: sitehub-web-admin
