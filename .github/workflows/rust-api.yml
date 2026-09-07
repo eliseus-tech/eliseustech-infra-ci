@@ -34,6 +34,14 @@ on:
         description: "Space-separated crates (dep order) to publish to kellnr on push to main"
         type: string
         default: ""
+      kellnr-host:
+        description: |
+          Hostname of the kellnr registry, used ONLY for the "is this version
+          already published?" pre-check. The actual publish target comes from
+          the caller repo's .cargo/config.toml registry index — changing this
+          input alone does not move where crates are published.
+        type: string
+        default: "kellnr.sitehub.bg"
     secrets:
       KELLNR_TOKEN:
         required: false
@@ -129,15 +137,25 @@ jobs:
         env:
           CARGO_REGISTRIES_KELLNR_TOKEN: ${{ secrets.KELLNR_TOKEN }}
           PUBLISH_CRATES: ${{ inputs.publish-crates }}
+          KELLNR_HOST: ${{ inputs.kellnr-host }}
         run: |
           set -uo pipefail
+          # The kellnr TOKEN is sent as an Authorization header to this host, so
+          # a caller-controlled hostname would be a credential-exfiltration
+          # primitive (and a typo would leak the token to a stranger). The input
+          # selects among hosts WE operate; it does not accept arbitrary ones.
+          # Adding a host is a reviewed change here, not a caller's parameter.
+          case "$KELLNR_HOST" in
+            kellnr.sitehub.bg|kellnr.eliseustech.com) ;;
+            *) echo "::error::kellnr-host '$KELLNR_HOST' is not an allowed registry host"; exit 1 ;;
+          esac
           for c in $PUBLISH_CRATES; do
             echo "::group::publish $c"
             ver=$(cargo metadata --no-deps --format-version 1 | jq -r --arg c "$c" '.packages[]|select(.name==$c)|.version')
             pre=$(printf '%s' "$c" | cut -c1-2); mid=$(printf '%s' "$c" | cut -c3-4)
             idx=$(curl -fsS --retry 5 --retry-all-errors --max-time 30 \
               -H "Authorization: $CARGO_REGISTRIES_KELLNR_TOKEN" \
-              "https://kellnr.sitehub.bg/api/v1/crates/$pre/$mid/$c" 2>/dev/null || true)
+              "https://${KELLNR_HOST}/api/v1/crates/$pre/$mid/$c" 2>/dev/null || true)
             if printf '%s' "$idx" | grep -q "\"vers\":\"$ver\""; then
               echo "$c@$ver already on kellnr — skip"
             else
