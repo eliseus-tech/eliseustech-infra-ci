@@ -31,7 +31,7 @@ name: deploy-image
 #         environment: { type: choice, options: [staging, production] }
 #   jobs:
 #     deploy:
-#       uses: sitehub-bg/sitehub-infra-ci/.github/workflows/deploy-image.yml@v4
+#       uses: eliseus-tech/eliseustech-infra-ci/.github/workflows/deploy-image.yml@v5
 #       with:
 #         app: sitehub-iam                 # Fly app base name
 #         image-name: sitehub-be-iam       # GHCR package = repo name
