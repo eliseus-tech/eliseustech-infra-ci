@@ -34,6 +34,14 @@ on:
         description: "Space-separated crates (dep order) to publish to kellnr on push to main"
         type: string
         default: ""
+      kellnr-host:
+        description: |
+          Hostname of the kellnr registry, used ONLY for the "is this version
+          already published?" pre-check. The actual publish target comes from
+          the caller repo's .cargo/config.toml registry index — changing this
+          input alone does not move where crates are published.
+        type: string
+        default: "kellnr.sitehub.bg"
     secrets:
       KELLNR_TOKEN:
         required: false
@@ -129,6 +137,7 @@ jobs:
         env:
           CARGO_REGISTRIES_KELLNR_TOKEN: ${{ secrets.KELLNR_TOKEN }}
           PUBLISH_CRATES: ${{ inputs.publish-crates }}
+          KELLNR_HOST: ${{ inputs.kellnr-host }}
         run: |
           set -uo pipefail
           for c in $PUBLISH_CRATES; do
@@ -137,7 +146,7 @@ jobs:
             pre=$(printf '%s' "$c" | cut -c1-2); mid=$(printf '%s' "$c" | cut -c3-4)
             idx=$(curl -fsS --retry 5 --retry-all-errors --max-time 30 \
               -H "Authorization: $CARGO_REGISTRIES_KELLNR_TOKEN" \
-              "https://kellnr.sitehub.bg/api/v1/crates/$pre/$mid/$c" 2>/dev/null || true)
+              "https://${KELLNR_HOST}/api/v1/crates/$pre/$mid/$c" 2>/dev/null || true)
             if printf '%s' "$idx" | grep -q "\"vers\":\"$ver\""; then
               echo "$c@$ver already on kellnr — skip"
             else
