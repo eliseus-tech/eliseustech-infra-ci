@@ -18,7 +18,7 @@ name: rust-api
 #     push: { branches: [main] }
 #   jobs:
 #     cicd:
-#       uses: sitehub-bg/sitehub-infra-ci/.github/workflows/rust-api.yml@v3
+#       uses: eliseus-tech/eliseustech-infra-ci/.github/workflows/rust-api.yml@v5
 #       with:
 #         publish-crates: sitehub-iam-core sitehub-iam-contracts
 #       secrets:

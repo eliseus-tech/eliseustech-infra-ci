@@ -1,0 +1,127 @@
+name: deploy-fly-config
+
+# Reusable, manually-dispatched deploy of an UPSTREAM-IMAGE service to Fly.
+#
+# "Deploy" here means pushing a fly config — nothing is built and no image is
+# chosen by this workflow. The image tag lives in the caller's
+# `<dir>/fly.<env>.toml`, so pinning a version is a reviewed commit in the repo
+# that owns the service, not a dispatch-time parameter someone can vary.
+# That distinction matters most for the message broker, where the server image
+# and the SDK crate must move as a matched pair.
+#
+# Extracted from sitehub-infra-external's deploy-surrealdb.yml so that every
+# product's infrastructure repo shares one deploy definition while keeping its
+# own configs and its own environment-scoped tokens. Centralise the *how*; the
+# *where* stays with whoever owns the service.
+#
+#   on:
+#     workflow_dispatch:
+#       inputs:
+#         environment: { type: choice, options: [staging, production] }
+#   jobs:
+#     deploy:
+#       uses: eliseus-tech/eliseustech-infra-ci/.github/workflows/deploy-fly-config.yml@v5
+#       with:
+#         service: surrealdb                  # the directory holding the configs
+#         environment: ${{ inputs.environment }}
+#       secrets:
+#         FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN_SURREALDB }}
+#
+# No --app is passed: each fly.<env>.toml declares its own. Building the app
+# name from strings here is what previously left a deploy pointing at
+# sitehub-datastore-*, destroyed in the rename to repo-mirroring names.
+#
+# The Fly org is implicit in the token — each environment's FLY_API_TOKEN is
+# scoped to that environment's org — so the `environment` input alone decides
+# where a deploy lands. That is also why the token stays a per-caller secret
+# rather than moving into this repo: one shared deploy definition, four
+# separately-scoped credentials.
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: "Directory in the caller repo holding fly.<env>.toml (e.g. surrealdb, iggy, iggy-ui)"
+        type: string
+        required: true
+      environment:
+        description: "staging | production — selects the config file, the GitHub Environment and its token"
+        type: string
+        required: true
+      timeout-minutes:
+        description: "Deploy timeout; raise for services that are slow to become healthy"
+        type: number
+        default: 10
+    secrets:
+      FLY_API_TOKEN:
+        description: "Deploy token scoped to the target environment's Fly org"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.service }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # Resolves Environment-scoped secrets AND any protection rules (required
+    # reviewers, wait timer) configured on it. This is the production gate.
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.service }}
+    steps:
+      - uses: actions/checkout@v6
+
+      # `service` names a directory that is joined into a path, so reject
+      # anything that could escape it or resolve somewhere unintended. A
+      # traversal here would deploy a config the caller never reviewed.
+      - name: Validate service name
+        working-directory: .
+        env:
+          SERVICE: ${{ inputs.service }}
+        run: |
+          case "$SERVICE" in
+            *[!a-z0-9-]* | "" | -* | *-) echo "::error::service '$SERVICE' must be lowercase alphanumeric with inner hyphens"; exit 1 ;;
+          esac
+          [ -d "$SERVICE" ] || { echo "::error::no directory '$SERVICE' in this repo"; exit 1; }
+
+      # Fail before touching Fly if the config is missing — dispatching an
+      # environment the service has no config for is the likeliest mistake, and
+      # flyctl's own error for it is not obvious.
+      - name: Verify config exists
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          SERVICE: ${{ inputs.service }}
+        run: |
+          cfg="fly.${ENVIRONMENT}.toml"
+          [ -f "$cfg" ] || { echo "::error::${SERVICE}/$cfg not found"; exit 1; }
+          echo "using $cfg -> app $(grep -m1 '^app *=' "$cfg" | cut -d'"' -f2)"
+
+      - uses: superfly/flyctl-actions/setup-flyctl@v1.4
+
+      - name: Deploy
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          ENVIRONMENT: ${{ inputs.environment }}
+        run: flyctl deploy --config "fly.${ENVIRONMENT}.toml"
+
+      - name: Summary
+        if: always()
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          SERVICE: ${{ inputs.service }}
+        run: |
+          {
+            echo "### Deploy"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| service | \`${SERVICE}\` |"
+            echo "| config | \`${SERVICE}/fly.${ENVIRONMENT}.toml\` |"
+            echo "| environment | ${ENVIRONMENT} |"
+          } >> "$GITHUB_STEP_SUMMARY"
