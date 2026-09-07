@@ -127,6 +127,15 @@ jobs:
           KELLNR_HOST: ${{ inputs.kellnr-host }}
         run: |
           set -uo pipefail
+          # The kellnr TOKEN is sent as an Authorization header to this host, so
+          # a caller-controlled hostname would be a credential-exfiltration
+          # primitive (and a typo would leak the token to a stranger). The input
+          # selects among hosts WE operate; it does not accept arbitrary ones.
+          # Adding a host is a reviewed change here, not a caller's parameter.
+          case "$KELLNR_HOST" in
+            kellnr.sitehub.bg|kellnr.eliseustech.com) ;;
+            *) echo "::error::kellnr-host '$KELLNR_HOST' is not an allowed registry host"; exit 1 ;;
+          esac
           for c in $PUBLISH_CRATES; do
             echo "::group::publish $c"
             ver=$(cargo metadata --no-deps --format-version 1 | jq -r --arg c "$c" '.packages[]|select(.name==$c)|.version')

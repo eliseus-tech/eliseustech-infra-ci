@@ -91,6 +91,21 @@ jobs:
     # reviewers, wait timer) configured on it. This is the production gate.
     environment: ${{ inputs.environment }}
     steps:
+      # The image source decides what code runs in production. Leaving the GHCR
+      # owner fully caller-controlled would turn "deploy one of our images" into
+      # "deploy any image on the internet" — the caller already chooses app,
+      # image-name and tag, and callers are documented as using `secrets:
+      # inherit`. Restrict it to owners WE control; adding one is a reviewed
+      # change to this file, not a parameter a caller can pass.
+      - name: Validate image source
+        env:
+          GHCR_ORG: ${{ inputs.ghcr-org }}
+        run: |
+          case "$GHCR_ORG" in
+            sitehub-bg|eliseus-tech) ;;
+            *) echo "::error::ghcr-org '$GHCR_ORG' is not an allowed image source"; exit 1 ;;
+          esac
+
       - uses: actions/checkout@v6
 
       # Logging in makes the check work whether or not the package is public yet.
