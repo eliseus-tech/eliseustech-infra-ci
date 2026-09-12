@@ -1,0 +1,110 @@
+name: docs-astro
+
+# Build and deploy an Astro documentation site to Cloudflare Pages.
+#
+# A sibling of fe-astro.yml, not a replacement for it. The difference is one
+# thing: fe-astro.yml REQUIRES staging-api-base and production-api-base, because
+# a product frontend has a gateway to talk to. A docs site has no API, and
+# passing a placeholder through an input that means "the API this frontend
+# calls" would be a lie that the next person has to decode. So the inputs are
+# dropped rather than defaulted.
+#
+# Callers:
+#   on:
+#     push:
+#       branches: [main]
+#       tags: ["v*"]
+#   jobs:
+#     docs:
+#       uses: eliseus-tech/eliseustech-infra-ci/.github/workflows/docs-astro.yml@v5
+#       with:
+#         staging-project: <pages project>-staging
+#         production-project: <pages project>-production
+#       secrets:
+#         CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+#         CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+on:
+  workflow_call:
+    inputs:
+      staging-project:
+        description: "Cloudflare Pages project for staging (deployed on push to main)"
+        type: string
+        required: true
+      production-project:
+        description: "Cloudflare Pages project for production (deployed on tag v*)"
+        type: string
+        required: true
+      node-version:
+        type: string
+        default: "24"
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+
+  deploy-staging:
+    needs: [check]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: deploy-${{ inputs.staging-project }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=${{ inputs.staging-project }} --branch=main
+
+  deploy-production:
+    needs: [check]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: deploy-${{ inputs.production-project }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=${{ inputs.production-project }} --branch=main
