@@ -31,6 +31,13 @@ on:
           already published?" pre-check. The actual publish target comes from
           the caller repo's .cargo/config.toml registry index — changing this
           input alone does not move where crates are published.
+
+          MIGRATION IN PROGRESS (2026-09-12): the registry has moved to
+          crates.eliseustech.com. The default still names the old host so that
+          repos which have not yet switched their .cargo/config.toml keep
+          pre-checking the registry they actually publish to. A repo migrates by
+          changing BOTH together. Flip this default and drop kellnr.sitehub.bg
+          from the allowlist once no caller is left on it.
         type: string
         default: "kellnr.sitehub.bg"
     secrets:
@@ -133,7 +140,7 @@ jobs:
           # selects among hosts WE operate; it does not accept arbitrary ones.
           # Adding a host is a reviewed change here, not a caller's parameter.
           case "$KELLNR_HOST" in
-            kellnr.sitehub.bg|kellnr.eliseustech.com) ;;
+            kellnr.sitehub.bg|crates.eliseustech.com) ;;
             *) echo "::error::kellnr-host '$KELLNR_HOST' is not an allowed registry host"; exit 1 ;;
           esac
           for c in $PUBLISH_CRATES; do
