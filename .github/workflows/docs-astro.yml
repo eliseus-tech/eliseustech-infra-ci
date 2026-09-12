@@ -18,8 +18,8 @@ name: docs-astro
 #     docs:
 #       uses: eliseus-tech/eliseustech-infra-ci/.github/workflows/docs-astro.yml@v5
 #       with:
-#         staging-project: <pages project>-staging
 #         production-project: <pages project>-production
+#         staging-project: <pages project>-staging   # OPTIONAL, see below
 #       secrets:
 #         CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 #         CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -28,9 +28,14 @@ on:
   workflow_call:
     inputs:
       staging-project:
-        description: "Cloudflare Pages project for staging (deployed on push to main)"
+        description: >-
+          Cloudflare Pages project for staging, deployed on push to main.
+          OPTIONAL. Leave it unset for a site that has no staging environment,
+          and `main` then deploys straight to production — see the note on the
+          deploy jobs below.
         type: string
-        required: true
+        required: false
+        default: ""
       production-project:
         description: "Cloudflare Pages project for production (deployed on tag v*)"
         type: string
@@ -65,9 +70,21 @@ jobs:
       - run: npm run check
       - run: npm run build
 
+  # Two shapes, chosen by whether `staging-project` is set.
+  #
+  #   set    main -> staging, tag v* -> production.   The usual flow.
+  #   unset  main -> production.                      No staging environment.
+  #
+  # The second exists because a staging environment is not free for every kind
+  # of site. A docs site has no runtime, no database and no user data, so the
+  # only failure a staging deploy could catch is a build error — which the
+  # `check` job above already catches on every push and pull request. What a
+  # second Pages project WOULD add is a second public *.pages.dev hostname
+  # serving the same content, which has to be remembered and gated separately.
+  # For internal documentation that is a liability, not a safety net.
   deploy-staging:
     needs: [check]
-    if: github.ref == 'refs/heads/main'
+    if: inputs.staging-project != '' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
@@ -89,7 +106,9 @@ jobs:
 
   deploy-production:
     needs: [check]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (inputs.staging-project == '' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     concurrency:
