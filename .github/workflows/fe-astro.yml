@@ -66,6 +66,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      # --if-present: not every frontend has a suite, and a missing script must
+      # not fail the run. One that does have tests gets them enforced here --
+      # this job is the only gate in front of a deploy.
+      - run: npm run test --if-present
       - run: npm run build
 
   deploy-staging:
